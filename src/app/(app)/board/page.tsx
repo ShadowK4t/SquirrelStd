@@ -1,6 +1,6 @@
 'use client'
 
-import { IconSearch, IconAdjustmentsHorizontal, IconClipboard, IconSubtask, IconFlame, IconMessage, IconClock, IconPlus, IconX } from '@tabler/icons-react'
+import { IconSearch, IconAdjustmentsHorizontal, IconClipboard, IconBooks, IconSubtask, IconFlame, IconMessage, IconClock, IconPlus, IconX, IconRecycle } from '@tabler/icons-react'
 import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import TaskModal from '@/components/task-modal'
@@ -13,8 +13,14 @@ type Status = {
   position: number
 }
 
+type User = {
+  id: string
+  full_name: string
+}
+
 type Task = {
   id: string
+  type: 'story' | 'task'
   title: string
   description: string | null
   version: number
@@ -22,9 +28,14 @@ type Task = {
   status_id: string
   needs_acceptance: boolean
   start_date: string | null
+  assignee: string | null
+  parent: { title: string }[] | { title: string } | null
+  assignee_user: { full_name: string } | null
+  reviewer_user: { full_name: string } | null
   subtasks: { count: number }[]
   comments: { count: number }[]
-  task_boards: { board: { name: string, color: string } }[]
+  task_boards: { board: { name: string; color: string } }[]
+  task_teams: { team: { name: string; color: string } }[]
 }
 
 const PRIORITY_LABELS: Record<number, string> = {
@@ -36,32 +47,45 @@ function timeElapsed(startDate: string | null): string {
   const days = Math.floor((Date.now() - new Date(startDate).getTime()) / 86400000)
   const weeks = Math.floor(days / 7)
   const rem = days % 7
-  if (weeks === 0) return `${days}d`
-  if (rem === 0) return `${weeks}w`
-  return `${weeks}w ${rem}d`
+  if (weeks === 0) return `${days} day${days !== 1 ? 's' : ''}`
+  if (rem === 0) return `${weeks} week${weeks !== 1 ? 's' : ''}`
+  return `${weeks} week${weeks !== 1 ? 's' : ''}, ${rem} day${rem !== 1 ? 's' : ''}`
 }
 
-const TASK_SELECT = 'id, title, description, version, priority, status_id, needs_acceptance, start_date, subtasks(count), comments(count), task_boards(board:boards(name, color))'
+function initials(name: string): string {
+  return name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
+}
+
+const TASK_SELECT = `
+  id, type, title, description, version, priority, status_id, needs_acceptance, start_date, assignee,
+  parent:tasks!parent_id(title),
+  assignee_user:users!assignee(full_name),
+  reviewer_user:users!reviewer_id(full_name),
+  subtasks(count),
+  comments(count),
+  task_boards(board:boards(name, color)),
+  task_teams(team:teams(name, color))
+`
 
 export default function BoardPage() {
   const [statuses, setStatuses]             = useState<Status[]>([])
   const [tasks, setTasks]                   = useState<Task[]>([])
+  const [users, setUsers]                   = useState<User[]>([])
+  const [currentUserId, setCurrentUserId]   = useState<string | null>(null)
   const [showModal, setShowModal]           = useState(false)
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [dragOverStatus, setDragOverStatus] = useState<string | null>(null)
 
-  // Search & filter
   const [search, setSearch]                       = useState('')
   const [showFilter, setShowFilter]               = useState(false)
   const [filterPriorities, setFilterPriorities]   = useState<Set<number>>(new Set())
   const [filterBoards, setFilterBoards]           = useState<Set<string>>(new Set())
+  const [filterUsers, setFilterUsers]             = useState<Set<string>>(new Set())
   const filterRef = useRef<HTMLDivElement>(null)
 
   async function fetchTasks() {
     const supabase = createClient()
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return
-    const { data } = await supabase.from('tasks').select(TASK_SELECT).eq('assignee', user.id)
+    const { data } = await supabase.from('tasks').select(TASK_SELECT)
     if (data) setTasks(data as unknown as Task[])
   }
 
@@ -69,10 +93,17 @@ export default function BoardPage() {
     const supabase = createClient()
     supabase.from('statuses').select('*').order('position')
       .then(({ data }) => { if (data) setStatuses(data) })
+    supabase.from('users').select('id, full_name').order('full_name')
+      .then(({ data }) => { if (data) setUsers(data) })
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (user) {
+        setCurrentUserId(user.id)
+        setFilterUsers(new Set([user.id]))
+      }
+    })
     fetchTasks()
   }, [])
 
-  // Close filter dropdown when clicking outside
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (filterRef.current && !filterRef.current.contains(e.target as Node)) {
@@ -94,17 +125,17 @@ export default function BoardPage() {
   }
 
   function togglePriority(p: number) {
-    setFilterPriorities(prev => {
-      const next = new Set(prev)
-      next.has(p) ? next.delete(p) : next.add(p)
-      return next
-    })
+    setFilterPriorities(prev => { const n = new Set(prev); n.has(p) ? n.delete(p) : n.add(p); return n })
   }
 
   function toggleBoard(name: string) {
-    setFilterBoards(prev => {
+    setFilterBoards(prev => { const n = new Set(prev); n.has(name) ? n.delete(name) : n.add(name); return n })
+  }
+
+  function toggleUserFilter(userId: string) {
+    setFilterUsers(prev => {
       const next = new Set(prev)
-      next.has(name) ? next.delete(name) : next.add(name)
+      next.has(userId) ? next.delete(userId) : next.add(userId)
       return next
     })
   }
@@ -113,15 +144,13 @@ export default function BoardPage() {
     setFilterPriorities(new Set())
     setFilterBoards(new Set())
     setSearch('')
+    if (currentUserId) setFilterUsers(new Set([currentUserId]))
   }
 
-  // All unique board names across tasks
-  const allBoards = Array.from(
-    new Set(tasks.flatMap(t => t.task_boards.map(tb => tb.board.name)))
-  )
+  const allBoards = Array.from(new Set(tasks.flatMap(t => t.task_boards.map(tb => tb.board.name))))
 
-  // Apply search + filters
   const filteredTasks = tasks.filter(task => {
+    if (filterUsers.size > 0 && (!task.assignee || !filterUsers.has(task.assignee))) return false
     if (search && !task.title.toLowerCase().includes(search.toLowerCase()) &&
         !task.description?.toLowerCase().includes(search.toLowerCase())) return false
     if (filterPriorities.size > 0 && !filterPriorities.has(task.priority)) return false
@@ -130,16 +159,13 @@ export default function BoardPage() {
   })
 
   const hasActiveFilters = filterPriorities.size > 0 || filterBoards.size > 0
-
-  const requestStatus   = statuses.find(s => s.label === 'Request')
-  const visibleStatuses = statuses.filter(s => s.label !== 'Request' && s.label !== 'Done')
+  const requestStatus    = statuses.find(s => s.label === 'Request')
+  const visibleStatuses  = statuses.filter(s => s.label !== 'Request' && s.label !== 'Done')
 
   return (
     <div className="flex flex-col h-full">
       {/* TOOLBAR */}
       <div className="flex items-center gap-6 mb-6">
-
-        {/* Search */}
         <div className="flex items-center gap-2 px-4 py-2 rounded-full border-2 border-sq-nav-inactive w-72">
           <IconSearch size={18} className="text-sq-nav-inactive" />
           <input
@@ -156,14 +182,25 @@ export default function BoardPage() {
           )}
         </div>
 
-        {/* Avatars */}
         <div className="flex items-center">
-          {[0, 1, 2, 3].map(i => (
-            <div key={i} className="w-8 h-8 rounded-full bg-sq-nav-inactive border-2 border-sq-bg -ml-2 first:ml-0" />
-          ))}
+          {users.map((u, i) => {
+            const active = filterUsers.has(u.id)
+            return (
+              <button
+                key={u.id}
+                onClick={() => toggleUserFilter(u.id)}
+                title={u.full_name}
+                className={`w-8 h-8 rounded-full border-2 border-sq-bg -ml-2 first:ml-0 flex items-center justify-center transition-all hover:scale-110 ${
+                  active ? 'bg-sq-accent' : 'bg-sq-nav-inactive opacity-50 hover:opacity-100'
+                }`}
+                style={{ zIndex: users.length - i }}
+              >
+                <span className="text-white text-xs font-bold leading-none">{initials(u.full_name)}</span>
+              </button>
+            )
+          })}
         </div>
 
-        {/* Filter */}
         <div className="relative" ref={filterRef}>
           <button
             onClick={() => setShowFilter(prev => !prev)}
@@ -178,11 +215,8 @@ export default function BoardPage() {
             )}
           </button>
 
-          {/* Filter dropdown */}
           {showFilter && (
             <div className="absolute top-10 left-0 z-40 bg-sq-col border border-sq-muted rounded-xl p-4 w-64 flex flex-col gap-4 shadow-xl">
-
-              {/* Priority */}
               <div className="flex flex-col gap-2">
                 <span className="text-white text-sm font-semibold">Priority</span>
                 <div className="flex flex-col gap-1">
@@ -190,21 +224,14 @@ export default function BoardPage() {
                     const p = Number(val)
                     const active = filterPriorities.has(p)
                     return (
-                      <button
-                        key={val}
-                        onClick={() => togglePriority(p)}
-                        className={`flex items-center gap-2 px-2 py-1 rounded text-sm text-left transition-colors ${
-                          active ? 'bg-sq-accent text-white' : 'text-sq-nav-inactive hover:text-white'
-                        }`}
-                      >
+                      <button key={val} onClick={() => togglePriority(p)}
+                        className={`flex items-center gap-2 px-2 py-1 rounded text-sm text-left transition-colors ${active ? 'bg-sq-accent text-white' : 'text-sq-nav-inactive hover:text-white'}`}>
                         {label}
                       </button>
                     )
                   })}
                 </div>
               </div>
-
-              {/* Boards */}
               {allBoards.length > 0 && (
                 <div className="flex flex-col gap-2">
                   <span className="text-white text-sm font-semibold">Board</span>
@@ -212,13 +239,8 @@ export default function BoardPage() {
                     {allBoards.map(name => {
                       const active = filterBoards.has(name)
                       return (
-                        <button
-                          key={name}
-                          onClick={() => toggleBoard(name)}
-                          className={`flex items-center gap-2 px-2 py-1 rounded text-sm text-left transition-colors ${
-                            active ? 'bg-sq-accent text-white' : 'text-sq-nav-inactive hover:text-white'
-                          }`}
-                        >
+                        <button key={name} onClick={() => toggleBoard(name)}
+                          className={`flex items-center gap-2 px-2 py-1 rounded text-sm text-left transition-colors ${active ? 'bg-sq-accent text-white' : 'text-sq-nav-inactive hover:text-white'}`}>
                           {name}
                         </button>
                       )
@@ -226,13 +248,8 @@ export default function BoardPage() {
                   </div>
                 </div>
               )}
-
-              {/* Clear */}
               {hasActiveFilters && (
-                <button
-                  onClick={clearFilters}
-                  className="text-sq-muted hover:text-white text-xs transition-colors text-left"
-                >
+                <button onClick={clearFilters} className="text-sq-muted hover:text-white text-xs transition-colors text-left">
                   Clear all filters
                 </button>
               )}
@@ -249,12 +266,12 @@ export default function BoardPage() {
         </button>
       </div>
 
-      {/* KANBAN COLUMNS */}
-      <div className="flex gap-4 items-start flex-1 overflow-x-auto">
+      {/* KANBAN COLUMNS — fixed width */}
+      <div className="flex gap-4 items-start flex-1 overflow-x-auto pb-4">
         {visibleStatuses.map(status => {
-          const columnTasks = (status.label === 'To Do'
+          const columnTasks = status.label === 'To Do'
             ? filteredTasks.filter(t => t.status_id === status.id || t.status_id === requestStatus?.id)
-            : filteredTasks.filter(t => t.status_id === status.id))
+            : filteredTasks.filter(t => t.status_id === status.id)
 
           const isOver = dragOverStatus === status.id
 
@@ -264,7 +281,7 @@ export default function BoardPage() {
               onDragOver={e => { e.preventDefault(); setDragOverStatus(status.id) }}
               onDragLeave={() => setDragOverStatus(null)}
               onDrop={e => handleDrop(e, status.id)}
-              className={`flex-1 min-w-56 bg-sq-col rounded-xl p-4 flex flex-col gap-3 transition-all ${isOver ? 'ring-2 ring-sq-accent' : ''}`}
+              className={`w-87 shrink-0 bg-sq-col rounded-xl p-4 flex flex-col gap-3 transition-all ${isOver ? 'ring-2 ring-sq-accent' : ''}`}
             >
               {/* Column header */}
               <div className="flex items-center justify-between">
@@ -278,76 +295,118 @@ export default function BoardPage() {
               </div>
 
               {/* Task cards */}
-              {columnTasks.map(task => (
-                <div
-                  key={task.id}
-                  draggable
-                  onDragStart={e => {
-                    e.dataTransfer.setData('taskId', task.id)
-                    e.dataTransfer.effectAllowed = 'move'
-                  }}
-                  onClick={() => setSelectedTaskId(task.id)}
-                  className="bg-sq-card rounded-xl p-3 flex flex-col gap-3 cursor-grab active:cursor-grabbing hover:brightness-110 transition-all"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-start gap-2 min-w-0">
-                      <IconClipboard size={18} className="text-sq-task-icon shrink-0 mt-0.5" />
-                      <span className="text-white font-semibold text-sm leading-tight">{task.title}</span>
+              {columnTasks.map(task => {
+                const subtaskCount = task.subtasks[0]?.count ?? 0
+                const commentCount = task.comments[0]?.count ?? 0
+                const people = [task.assignee_user, task.reviewer_user].filter(Boolean) as { full_name: string }[]
+
+                return (
+                  <div
+                    key={task.id}
+                    draggable
+                    onDragStart={e => { e.dataTransfer.setData('taskId', task.id); e.dataTransfer.effectAllowed = 'move' }}
+                    onClick={() => setSelectedTaskId(task.id)}
+                    className="bg-sq-card rounded-xl p-3 flex flex-col gap-2.5 cursor-grab active:cursor-grabbing hover:brightness-110 transition-all"
+                  >
+                    {/* Row 1: Icon + Title + Version */}
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-start gap-2 min-w-0">
+                        {task.type === 'story'
+                          ? <IconBooks size={20} className="text-sq-accent shrink-0 mt-0.5" />
+                          : <IconClipboard size={20} className="text-sq-accent shrink-0 mt-0.5" />
+                        }
+                        <span className="text-white font-semibold text-sm leading-tight">{task.title}</span>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <IconRecycle size={14} className="text-sq-muted" />
+                        <span className="text-sq-muted text-xs font-semibold">Ver {task.version}</span>
+                      </div>
                     </div>
-                    <span className="text-sq-muted text-xs shrink-0">Ver {task.version}</span>
-                  </div>
 
-                  {task.description && (
-                    <p className="text-sq-nav-inactive text-xs leading-relaxed line-clamp-2 pl-6">
-                      {task.description}
-                    </p>
-                  )}
+                    {/* Row 2: Period */}
+                    {task.start_date && (
+                      <div className="flex items-center gap-2 pl-1">
+                        <IconClock size={15} className="text-sq-muted shrink-0" />
+                        <span className="text-white text-xs">{timeElapsed(task.start_date)}</span>
+                      </div>
+                    )}
 
-                  {task.status_id === requestStatus?.id && (
-                    <div className="flex gap-2" onClick={e => e.stopPropagation()}>
-                      <button className="flex-1 text-xs py-1 rounded-lg bg-sq-accent text-white font-semibold">Accept</button>
-                      <button className="flex-1 text-xs py-1 rounded-lg border border-sq-muted text-sq-muted font-semibold">Reject</button>
-                    </div>
-                  )}
-
-                  {task.start_date && (
-                    <div className="flex items-center gap-2">
-                      <IconClock size={14} className="text-sq-muted" />
-                      <span className="text-sq-nav-inactive text-xs">{timeElapsed(task.start_date)}</span>
-                    </div>
-                  )}
-
-                  {task.task_boards.length > 0 && (
-                    <div className="flex gap-1.5 flex-wrap">
-                      {task.task_boards.map((tb, i) => (
-                        <div key={i} className="h-5 px-2 rounded-full flex items-center" style={{ backgroundColor: tb.board.color }}>
-                          <span className="text-white text-xs font-medium">{tb.board.name}</span>
+                    {/* Row 3: Story */}
+                    {(() => {
+                      const parentTitle = Array.isArray(task.parent)
+                        ? task.parent[0]?.title
+                        : task.parent?.title
+                      return parentTitle ? (
+                        <div className="flex items-center gap-2 pl-1">
+                          <IconBooks size={15} className="text-sq-muted shrink-0" />
+                          <span className="text-white text-xs">{parentTitle}</span>
                         </div>
-                      ))}
-                    </div>
-                  )}
+                      ) : null
+                    })()}
 
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center">
-                      {[0, 1, 2, 3, 4].map(i => (
-                        <div key={i} className="w-5 h-5 rounded-full bg-sq-nav-inactive border-2 border-sq-card -ml-1.5 first:ml-0" />
-                      ))}
-                    </div>
-                    <div className="flex items-center gap-2 text-sq-muted text-xs">
-                      <div className="flex items-center gap-1">
-                        <IconMessage size={13} />
-                        <span>{task.comments[0]?.count ?? 0}</span>
+                    {/* Row 4: Pills (teams + boards) */}
+                    {(task.task_teams.length > 0 || task.task_boards.length > 0) && (
+                      <div className="flex gap-1.5 flex-wrap">
+                        {task.task_teams.map((tt, i) => (
+                          <div key={i} className="h-6 px-3 rounded-full flex items-center bg-sq-col">
+                            <span className="text-white text-xs font-medium">{tt.team.name}</span>
+                          </div>
+                        ))}
+                        {task.task_boards.map((tb, i) => (
+                          <div key={i} className="h-6 px-3 rounded-full flex items-center" style={{ backgroundColor: tb.board.color }}>
+                            <span className="text-white text-xs font-medium">{tb.board.name}</span>
+                          </div>
+                        ))}
                       </div>
-                      <div className="flex items-center gap-1">
-                        <IconSubtask size={13} />
-                        <span>{task.subtasks[0]?.count ?? 0}</span>
+                    )}
+
+                    {/* Request accept/reject */}
+                    {task.status_id === requestStatus?.id && (
+                      <div className="flex gap-2" onClick={e => e.stopPropagation()}>
+                        <button className="flex-1 text-xs py-1 rounded-lg bg-sq-accent text-white font-semibold">Accept</button>
+                        <button className="flex-1 text-xs py-1 rounded-lg border border-sq-muted text-sq-muted font-semibold">Reject</button>
                       </div>
-                      {task.priority >= 3 && <IconFlame size={14} className="text-sq-danger" />}
+                    )}
+
+                    {/* Row 5: People + Actions */}
+                    <div className="flex items-center justify-between">
+                      {/* User initials circles */}
+                      <div className="flex items-center">
+                        {people.length > 0
+                          ? people.map((u, i) => (
+                              <div key={i} className="w-6 h-6 rounded-full bg-sq-accent border-2 border-sq-card -ml-1.5 first:ml-0 flex items-center justify-center">
+                                <span className="text-white text-xs font-bold leading-none">{initials(u.full_name)}</span>
+                              </div>
+                            ))
+                          : <div className="w-6 h-6 rounded-full bg-sq-nav-inactive border-2 border-sq-card" />
+                        }
+                      </div>
+
+                      {/* Actions */}
+                      <div className="flex items-center gap-3 text-sq-muted text-xs">
+                        <button
+                          onClick={e => { e.stopPropagation(); setSelectedTaskId(task.id) }}
+                          className="flex items-center gap-1 hover:text-white transition-colors"
+                        >
+                          <IconMessage size={14} />
+                          <span>{commentCount}</span>
+                        </button>
+                        {subtaskCount > 0 && (
+                          <button
+                            onClick={e => { e.stopPropagation(); setSelectedTaskId(task.id) }}
+                            className="flex items-center gap-1 hover:text-white transition-colors"
+                          >
+                            <IconSubtask size={14} />
+                            <span>{subtaskCount}</span>
+                          </button>
+                        )}
+                        {task.priority >= 3 && <IconFlame size={14} className="text-sq-danger" />}
+                      </div>
                     </div>
+
                   </div>
-
-                </div>
-              ))}
+                )
+              })}
 
             </div>
           )

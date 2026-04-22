@@ -2,15 +2,18 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { IconClipboard, IconX, IconCheck, IconPencil, IconDeviceFloppy } from '@tabler/icons-react'
+import { IconClipboard, IconBooks, IconX, IconCheck, IconPencil, IconDeviceFloppy, IconLink, IconPlus } from '@tabler/icons-react'
 
 type Status   = { id: string; label: string; color: string }
 type User     = { id: string; full_name: string }
-type Subtask  = { id: string; title: string; is_done: boolean; position: number }
+type Team     = { id: string; name: string; color: string }
+type Subtask      = { id: string; title: string; is_done: boolean; position: number }
+type LinkedTask   = { id: string; title: string; status: { label: string; color: string } }
 type Comment  = { id: string; content: string; created_at: string; user: { full_name: string } }
 
 type TaskDetail = {
   id: string
+  type: 'story' | 'task'
   title: string
   description: string | null
   version: number
@@ -29,7 +32,9 @@ type TaskDetail = {
   creator_user: { full_name: string } | null
   subtasks: Subtask[]
   comments: Comment[]
+  related_task_ids: string[]
   task_boards: { board: { name: string; color: string } }[]
+  task_teams: { is_responsible: boolean; team: { id: string; name: string; color: string } }[]
 }
 
 const PRIORITY_LABELS: Record<number, string> = {
@@ -40,6 +45,17 @@ const PRIORITY_COLORS: Record<number, string> = {
   0: '#6B6B6B', 1: '#50fa7b', 2: '#F3A63A', 3: '#ffb86c', 4: '#B84040',
 }
 
+function getElapsed(startDate: string | null): string {
+  if (!startDate) return '—'
+  const days = Math.floor((Date.now() - new Date(startDate).getTime()) / 86400000)
+  if (days === 0) return 'Today'
+  if (days === 1) return '1 day'
+  if (days < 7) return `${days} days`
+  if (days < 30) return `${Math.floor(days / 7)} week${Math.floor(days / 7) > 1 ? 's' : ''}`
+  if (days < 365) return `${Math.floor(days / 30)} month${Math.floor(days / 30) > 1 ? 's' : ''}`
+  return `${Math.floor(days / 365)} year${Math.floor(days / 365) > 1 ? 's' : ''}`
+}
+
 type Props = {
   taskId: string
   onClose: () => void
@@ -47,14 +63,20 @@ type Props = {
 }
 
 export default function TaskDetailModal({ taskId, onClose, onUpdated }: Props) {
-  const [task, setTask]       = useState<TaskDetail | null>(null)
-  const [statuses, setStatuses] = useState<Status[]>([])
-  const [users, setUsers]     = useState<User[]>([])
-  const [comment, setComment] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [submitting, setSubmitting] = useState(false)
-  const [editing, setEditing] = useState(false)
-  const [editTitle, setEditTitle]       = useState('')
+  const [task, setTask]             = useState<TaskDetail | null>(null)
+  const [statuses, setStatuses]     = useState<Status[]>([])
+  const [users, setUsers]           = useState<User[]>([])
+  const [teams, setTeams]           = useState<Team[]>([])
+  const [stories, setStories]       = useState<{ id: string; title: string }[]>([])
+  const [linkedTasks, setLinkedTasks]   = useState<LinkedTask[]>([])
+  const [allTasks, setAllTasks]         = useState<{ id: string; title: string }[]>([])
+  const [comment, setComment]           = useState('')
+  const [loading, setLoading]           = useState(true)
+  const [submitting, setSubmitting]     = useState(false)
+  const [editing, setEditing]           = useState(false)
+
+  // Edit mode state
+  const [editTitle, setEditTitle]             = useState('')
   const [editDescription, setEditDescription] = useState('')
 
   async function fetchTask() {
@@ -62,20 +84,34 @@ export default function TaskDetailModal({ taskId, onClose, onUpdated }: Props) {
     const { data } = await supabase
       .from('tasks')
       .select(`
-        id, title, description, version, priority, status_id,
-        start_date, end_date, needs_acceptance, assignee, reviewer_id, created_by, parent_id,
+        id, type, title, description, version, priority, status_id,
+        start_date, end_date, needs_acceptance, assignee, reviewer_id, created_by, parent_id, related_task_ids,
         parent:tasks!parent_id(title),
         assignee_user:users!assignee(full_name),
         reviewer_user:users!reviewer_id(full_name),
         creator_user:users!created_by(full_name),
         subtasks(id, title, is_done, position),
         comments(id, content, created_at, user:users!user_id(full_name)),
-        task_boards(board:boards(name, color))
+        task_boards(board:boards(name, color)),
+        task_teams(is_responsible, team:teams(id, name, color))
       `)
       .eq('id', taskId)
       .single()
 
-    if (data) setTask(data as unknown as TaskDetail)
+    if (data) {
+      const t = data as unknown as TaskDetail
+      setTask(t)
+      if (t.related_task_ids?.length > 0) {
+        const supabase = createClient()
+        supabase
+          .from('tasks')
+          .select('id, title, status:statuses!status_id(label, color)')
+          .in('id', t.related_task_ids)
+          .then(({ data: linked }) => { if (linked) setLinkedTasks(linked as unknown as LinkedTask[]) })
+      } else {
+        setLinkedTasks([])
+      }
+    }
     setLoading(false)
   }
 
@@ -86,16 +122,13 @@ export default function TaskDetailModal({ taskId, onClose, onUpdated }: Props) {
       .then(({ data }) => { if (data) setStatuses(data) })
     supabase.from('users').select('id, full_name')
       .then(({ data }) => { if (data) setUsers(data) })
+    supabase.from('teams').select('id, name, color').order('name')
+      .then(({ data }) => { if (data) setTeams(data) })
+    supabase.from('tasks').select('id, title').neq('id', taskId).order('title')
+      .then(({ data }) => { if (data) setAllTasks(data) })
+    supabase.from('tasks').select('id, title').eq('type', 'story').neq('id', taskId).order('title')
+      .then(({ data }) => { if (data) setStories(data) })
   }, [taskId])
-
-  async function toggleSubtask(subtask: Subtask) {
-    const supabase = createClient()
-    await supabase.from('subtasks').update({ is_done: !subtask.is_done }).eq('id', subtask.id)
-    setTask(prev => prev ? {
-      ...prev,
-      subtasks: prev.subtasks.map(s => s.id === subtask.id ? { ...s, is_done: !s.is_done } : s)
-    } : prev)
-  }
 
   function startEditing() {
     if (!task) return
@@ -116,11 +149,55 @@ export default function TaskDetailModal({ taskId, onClose, onUpdated }: Props) {
     onUpdated()
   }
 
-  async function updateField(field: string, value: string | number) {
+  async function updateField(field: string, value: string | number | null) {
     const supabase = createClient()
-    await supabase.from('tasks').update({ [field]: value }).eq('id', taskId)
-    setTask(prev => prev ? { ...prev, [field]: value } : prev)
+    await supabase.from('tasks').update({ [field]: value || null }).eq('id', taskId)
+    setTask(prev => prev ? { ...prev, [field]: value || null } : prev)
     onUpdated()
+  }
+
+  async function addLinkedTask(linkedId: string) {
+    if (!task || !linkedId || task.related_task_ids.includes(linkedId)) return
+    const updated = [...task.related_task_ids, linkedId]
+    const supabase = createClient()
+    await supabase.from('tasks').update({ related_task_ids: updated }).eq('id', taskId)
+    setTask(prev => prev ? { ...prev, related_task_ids: updated } : prev)
+    const { data } = await supabase
+      .from('tasks')
+      .select('id, title, status:statuses!status_id(label, color)')
+      .eq('id', linkedId)
+      .single()
+    if (data) setLinkedTasks(prev => [...prev, data as unknown as LinkedTask])
+    onUpdated()
+  }
+
+  async function removeLinkedTask(linkedId: string) {
+    if (!task) return
+    const updated = task.related_task_ids.filter(id => id !== linkedId)
+    const supabase = createClient()
+    await supabase.from('tasks').update({ related_task_ids: updated }).eq('id', taskId)
+    setTask(prev => prev ? { ...prev, related_task_ids: updated } : prev)
+    setLinkedTasks(prev => prev.filter(t => t.id !== linkedId))
+    onUpdated()
+  }
+
+  async function updateTeam(teamId: string) {
+    const supabase = createClient()
+    await supabase.from('task_teams').delete().eq('task_id', taskId).eq('is_responsible', true)
+    if (teamId) {
+      await supabase.from('task_teams').insert({ task_id: taskId, team_id: teamId, is_responsible: true })
+    }
+    fetchTask()
+    onUpdated()
+  }
+
+  async function toggleSubtask(subtask: Subtask) {
+    const supabase = createClient()
+    await supabase.from('subtasks').update({ is_done: !subtask.is_done }).eq('id', subtask.id)
+    setTask(prev => prev ? {
+      ...prev,
+      subtasks: prev.subtasks.map(s => s.id === subtask.id ? { ...s, is_done: !s.is_done } : s)
+    } : prev)
   }
 
   async function submitComment() {
@@ -135,11 +212,14 @@ export default function TaskDetailModal({ taskId, onClose, onUpdated }: Props) {
     fetchTask()
   }
 
-  const activeStatus = statuses.find(s => s.id === task?.status_id)
+  const activeStatus       = statuses.find(s => s.id === task?.status_id)
+  const responsibleTeamId  = task?.task_teams.find(t => t.is_responsible)?.team.id ?? ''
+  const responsibleTeam    = task?.task_teams.find(t => t.is_responsible)?.team
+  const relatedTeams       = task?.task_teams.filter(t => !t.is_responsible) ?? []
 
   if (loading) return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div className="absolute inset-0 backdrop-blur-sm bg-black/20" onClick={onClose} />
       <div className="relative bg-sq-card rounded-xl w-200 h-96 flex items-center justify-center">
         <span className="text-sq-muted text-sm">Loading...</span>
       </div>
@@ -150,7 +230,7 @@ export default function TaskDetailModal({ taskId, onClose, onUpdated }: Props) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div className="absolute inset-0 backdrop-blur-sm bg-black/20" onClick={onClose} />
 
       <div className="relative bg-sq-card rounded-xl w-200 max-h-[90vh] overflow-hidden flex flex-col">
 
@@ -158,7 +238,10 @@ export default function TaskDetailModal({ taskId, onClose, onUpdated }: Props) {
         <div className="flex items-start justify-between p-6 pb-4 shrink-0">
           <div className="flex flex-col gap-1 flex-1 min-w-0">
             <div className="flex items-center gap-3">
-              <IconClipboard size={24} className="text-sq-task-icon shrink-0" />
+              {task.type === 'story'
+                ? <IconBooks size={24} className="text-sq-accent shrink-0" />
+                : <IconClipboard size={24} className="text-sq-task-icon shrink-0" />
+              }
               {editing
                 ? <input
                     autoFocus
@@ -169,8 +252,10 @@ export default function TaskDetailModal({ taskId, onClose, onUpdated }: Props) {
                 : <h2 className="text-white font-bold text-2xl">{task.title}</h2>
               }
             </div>
-            {task.parent && (
-              <span className="text-sq-muted text-sm ml-9">↳ {task.parent.title}</span>
+            {(task.parent || task.parent_id) && (
+              <span className="text-sq-muted text-sm ml-9">
+                ↳ {task.parent?.title ?? stories.find(s => s.id === task.parent_id)?.title}
+              </span>
             )}
           </div>
           <div className="flex items-center gap-3 shrink-0 ml-4">
@@ -237,9 +322,7 @@ export default function TaskDetailModal({ taskId, onClose, onUpdated }: Props) {
                         className="flex items-center gap-3 text-left group"
                       >
                         <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
-                          sub.is_done
-                            ? 'bg-sq-accent border-sq-accent'
-                            : 'border-sq-muted group-hover:border-white'
+                          sub.is_done ? 'bg-sq-accent border-sq-accent' : 'border-sq-muted group-hover:border-white'
                         }`}>
                           {sub.is_done && <IconCheck size={10} className="text-white" />}
                         </div>
@@ -251,6 +334,60 @@ export default function TaskDetailModal({ taskId, onClose, onUpdated }: Props) {
                   </div>
                 )
               }
+            </div>
+
+            {/* Linked Tasks */}
+            <div className="flex flex-col gap-2">
+              <label className="text-white font-semibold text-base">
+                Linked Tasks {linkedTasks.length > 0 && <span className="text-sq-muted font-normal text-sm">({linkedTasks.length})</span>}
+              </label>
+
+              {linkedTasks.length === 0 && !editing && (
+                <span className="text-sq-muted text-xs italic">No blocking tasks</span>
+              )}
+
+              {linkedTasks.length > 0 && (
+                <div className="flex flex-col gap-2">
+                  {linkedTasks.map(t => (
+                    <div key={t.id} className="flex items-center justify-between gap-2 bg-sq-col rounded-lg px-3 py-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <IconLink size={13} className="text-sq-muted shrink-0" />
+                        <span className="text-white text-sm truncate">{t.title}</span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span
+                          className="text-xs font-medium px-2 py-0.5 rounded-full"
+                          style={{ backgroundColor: t.status.color + '33', color: t.status.color }}
+                        >
+                          {t.status.label}
+                        </span>
+                        {editing && (
+                          <button onClick={() => removeLinkedTask(t.id)} className="text-sq-muted hover:text-sq-danger transition-colors">
+                            <IconX size={13} />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {editing && (
+                <div className="flex items-center gap-2">
+                  <select
+                    defaultValue=""
+                    onChange={e => { addLinkedTask(e.target.value); e.target.value = '' }}
+                    className="flex-1 bg-sq-col border border-sq-muted rounded text-white text-sm px-2 py-1.5 outline-none"
+                  >
+                    <option value="" disabled>Add blocking task...</option>
+                    {allTasks
+                      .filter(t => !task?.related_task_ids.includes(t.id))
+                      .map(t => <option key={t.id} value={t.id}>{t.title}</option>)
+                    }
+                  </select>
+                  <IconPlus size={16} className="text-sq-muted shrink-0" />
+                </div>
+              )}
             </div>
 
             {/* Board tags */}
@@ -308,64 +445,126 @@ export default function TaskDetailModal({ taskId, onClose, onUpdated }: Props) {
           {/* RIGHT — sidebar */}
           <div className="w-56 bg-sq-col p-4 flex flex-col gap-4 shrink-0 overflow-y-auto">
 
+            {/* Assignee */}
             <div className="flex flex-col gap-1">
               <label className="text-white text-sm font-medium">Assignee</label>
-              <select
-                value={task.assignee ?? ''}
-                onChange={e => updateField('assignee', e.target.value)}
-                className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none"
-              >
-                {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
-              </select>
+              {editing
+                ? <select
+                    value={task.assignee ?? ''}
+                    onChange={e => updateField('assignee', e.target.value)}
+                    className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none"
+                  >
+                    <option value="">None</option>
+                    {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+                  </select>
+                : <span className="text-white text-sm">{task.assignee_user?.full_name ?? '—'}</span>
+              }
             </div>
 
+            {/* Priority */}
             <div className="flex flex-col gap-1">
               <label className="text-white text-sm font-medium">Priority</label>
-              <select
-                value={task.priority}
-                onChange={e => updateField('priority', Number(e.target.value))}
-                className="bg-sq-card border border-sq-muted rounded text-xs px-2 py-1.5 outline-none font-medium"
-                style={{ color: PRIORITY_COLORS[task.priority] }}
-              >
-                {Object.entries(PRIORITY_LABELS).map(([val, label]) => (
-                  <option key={val} value={val}>{label}</option>
-                ))}
-              </select>
+              {editing
+                ? <select
+                    value={task.priority}
+                    onChange={e => updateField('priority', Number(e.target.value))}
+                    className="bg-sq-card border border-sq-muted rounded text-xs px-2 py-1.5 outline-none font-medium"
+                    style={{ color: PRIORITY_COLORS[task.priority] }}
+                  >
+                    {Object.entries(PRIORITY_LABELS).map(([val, label]) => (
+                      <option key={val} value={val}>{label}</option>
+                    ))}
+                  </select>
+                : <span className="text-sm font-medium" style={{ color: PRIORITY_COLORS[task.priority] }}>
+                    {PRIORITY_LABELS[task.priority]}
+                  </span>
+              }
             </div>
 
+            {/* Reviewer */}
             <div className="flex flex-col gap-1">
               <label className="text-white text-sm font-medium">Reviewer</label>
-              <select
-                value={task.reviewer_id ?? ''}
-                onChange={e => updateField('reviewer_id', e.target.value)}
-                className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none"
-              >
-                <option value="">None</option>
-                {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
-              </select>
+              {editing
+                ? <select
+                    value={task.reviewer_id ?? ''}
+                    onChange={e => updateField('reviewer_id', e.target.value)}
+                    className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none"
+                  >
+                    <option value="">None</option>
+                    {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+                  </select>
+                : <span className="text-white text-sm">{task.reviewer_user?.full_name ?? '—'}</span>
+              }
             </div>
 
+            {/* Period */}
             <div className="flex flex-col gap-1">
               <label className="text-white text-sm font-medium">Period</label>
-              <input
-                type="date"
-                value={task.start_date ?? ''}
-                onChange={e => updateField('start_date', e.target.value)}
-                className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none"
-              />
-              <input
-                type="date"
-                value={task.end_date ?? ''}
-                onChange={e => updateField('end_date', e.target.value)}
-                className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none"
-              />
+              {editing
+                ? <input
+                    type="date"
+                    value={task.start_date ?? ''}
+                    onChange={e => updateField('start_date', e.target.value)}
+                    className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none"
+                  />
+                : <span className="text-white text-sm">{getElapsed(task.start_date)}</span>
+              }
             </div>
 
+            {/* Story — only for tasks */}
+            {task.type === 'task' && (
+              <div className="flex flex-col gap-1">
+                <label className="text-white text-sm font-medium">Story</label>
+                {editing
+                  ? <select
+                      value={task.parent_id ?? ''}
+                      onChange={e => updateField('parent_id', e.target.value)}
+                      className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none"
+                    >
+                      <option value="">None</option>
+                      {stories.map(s => <option key={s.id} value={s.id}>{s.title}</option>)}
+                    </select>
+                  : <span className="text-white text-sm">{task.parent?.title ?? '—'}</span>
+                }
+              </div>
+            )}
+
+            {/* Team */}
+            <div className="flex flex-col gap-1">
+              <label className="text-white text-sm font-medium">Team</label>
+              {editing
+                ? <select
+                    value={responsibleTeamId}
+                    onChange={e => updateTeam(e.target.value)}
+                    className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none"
+                  >
+                    <option value="">None</option>
+                    {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                : <span className="text-white text-sm">{responsibleTeam?.name ?? '—'}</span>
+              }
+            </div>
+
+            {/* Team Related — read-only always */}
+            <div className="flex flex-col gap-1">
+              <label className="text-white text-sm font-medium">Team Related</label>
+              {relatedTeams.length > 0
+                ? <div className="flex flex-col gap-1">
+                    {relatedTeams.map(t => (
+                      <span key={t.team.id} className="text-white text-sm">{t.team.name}</span>
+                    ))}
+                  </div>
+                : <span className="text-sq-muted text-xs italic">None</span>
+              }
+            </div>
+
+            {/* Version */}
             <div className="flex flex-col gap-1">
               <label className="text-white text-sm font-medium">Version</label>
               <span className="text-white text-xs">v{task.version}</span>
             </div>
 
+            {/* Creator */}
             <div className="flex flex-col gap-1">
               <label className="text-white text-sm font-medium">Creator</label>
               <span className="text-white text-sm">{task.creator_user?.full_name ?? '—'}</span>

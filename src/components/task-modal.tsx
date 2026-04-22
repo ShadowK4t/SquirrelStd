@@ -7,6 +7,7 @@ import { IconClipboard, IconX, IconPlus, IconTrash, IconBooks } from '@tabler/ic
 type Status = { id: string; label: string; color: string }
 type User   = { id: string; full_name: string }
 type Task   = { id: string; title: string }
+type Team   = { id: string; name: string; color: string }
 
 const PRIORITY_LABELS: Record<number, string> = {
   0: 'None', 1: 'Low', 2: 'Medium', 3: 'High', 4: 'Critical',
@@ -23,6 +24,7 @@ export default function TaskModal({ onClose, onCreated, defaultType = 'task', de
   const [statuses, setStatuses]       = useState<Status[]>([])
   const [users, setUsers]             = useState<User[]>([])
   const [stories, setStories]         = useState<Task[]>([])
+  const [teams, setTeams]             = useState<Team[]>([])
   const [currentUser, setCurrentUser] = useState<User | null>(null)
   const [loading, setLoading]         = useState(false)
   const [error, setError]             = useState<string | null>(null)
@@ -36,8 +38,8 @@ export default function TaskModal({ onClose, onCreated, defaultType = 'task', de
   const [reviewerId, setReviewerId]   = useState('')
   const [priority, setPriority]       = useState(2)
   const [startDate, setStartDate]     = useState('')
-  const [endDate, setEndDate]         = useState('')
   const [parentId, setParentId]       = useState(defaultParentId)
+  const [teamId, setTeamId]           = useState('')
   const [subtasks, setSubtasks]       = useState<string[]>([''])
 
   useEffect(() => {
@@ -57,6 +59,9 @@ export default function TaskModal({ onClose, onCreated, defaultType = 'task', de
 
     supabase.from('tasks').select('id, title').eq('type', 'story')
       .then(({ data }) => { if (data) setStories(data) })
+
+    supabase.from('teams').select('id, name, color').order('name')
+      .then(({ data }) => { if (data) setTeams(data) })
 
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (user) {
@@ -88,11 +93,10 @@ export default function TaskModal({ onClose, onCreated, defaultType = 'task', de
         title: title.trim(),
         description: description.trim() || null,
         status_id: statusId,
-        assignee: assigneeId,
-        reviewer_id: reviewerId,
+        assignee: assigneeId || null,
+        reviewer_id: reviewerId || null,
         priority,
         start_date: startDate || null,
-        end_date: endDate || null,
         parent_id: type === 'task' ? parentId : null,
         created_by: currentUser?.id,
         type,
@@ -115,6 +119,10 @@ export default function TaskModal({ onClose, onCreated, defaultType = 'task', de
       )
     }
 
+    if (teamId) {
+      await supabase.from('task_teams').insert({ task_id: task.id, team_id: teamId, is_responsible: true })
+    }
+
     setLoading(false)
     onCreated()
     onClose()
@@ -122,7 +130,7 @@ export default function TaskModal({ onClose, onCreated, defaultType = 'task', de
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div className="absolute inset-0 backdrop-blur-sm bg-black/20" onClick={onClose} />
 
       <div className="relative bg-sq-card rounded-xl w-200 max-h-[90vh] overflow-y-auto flex flex-col">
 
@@ -188,86 +196,53 @@ export default function TaskModal({ onClose, onCreated, defaultType = 'task', de
           </div>
         </div>
 
-        {/* Body */}
-        {type === 'story' ? (
+        {/* Body — same layout for both story and task */}
+        <div className="flex flex-1 min-h-0">
 
-          /* STORY — simple layout */
-          <div className="px-6 pb-6 flex flex-col gap-4">
+          {/* LEFT */}
+          <div className="flex-1 px-6 pb-6 flex flex-col gap-6 overflow-y-auto">
+
             <div className="flex flex-col gap-2">
               <label className="text-white font-semibold text-base">Description</label>
               <textarea
                 value={description}
                 onChange={e => setDescription(e.target.value)}
-                placeholder="What is this story about?"
+                placeholder={type === 'story' ? 'What is this story about?' : 'Describe the task...'}
                 rows={3}
                 className="bg-sq-col border border-sq-muted rounded text-white text-sm p-3 outline-none resize-none placeholder:text-sq-muted"
               />
             </div>
-            {error && <p className="text-sq-danger text-sm">{error}</p>}
-            <div className="flex gap-2 pt-2">
+
+            <div className="flex flex-col gap-2">
+              <label className="text-white font-semibold text-base">Subtasks</label>
+              <div className="flex flex-col gap-1">
+                {subtasks.map((sub, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={sub}
+                      onChange={e => updateSubtask(i, e.target.value)}
+                      placeholder={`Subtask ${i + 1}`}
+                      className="flex-1 bg-sq-col border border-sq-muted rounded text-white text-sm px-3 py-2 outline-none placeholder:text-sq-muted"
+                    />
+                    {subtasks.length > 1 && (
+                      <button onClick={() => removeSubtask(i)} className="text-sq-muted hover:text-sq-danger transition-colors">
+                        <IconTrash size={14} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
               <button
-                onClick={handleSubmit}
-                disabled={loading}
-                className="bg-sq-accent text-white text-sm font-semibold px-6 py-2 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
+                onClick={addSubtask}
+                className="flex items-center gap-1 text-sq-muted hover:text-white text-xs transition-colors w-fit"
               >
-                {loading ? 'Creating...' : 'Create Story'}
-              </button>
-              <button
-                onClick={onClose}
-                className="border border-sq-muted text-sq-muted text-sm px-6 py-2 rounded-lg hover:text-white hover:border-white transition-colors"
-              >
-                Cancel
+                <IconPlus size={14} /> Add subtask
               </button>
             </div>
-          </div>
 
-        ) : (
-
-          /* TASK — full two-column layout */
-          <div className="flex flex-1 min-h-0">
-
-            {/* LEFT */}
-            <div className="flex-1 px-6 pb-6 flex flex-col gap-6 overflow-y-auto">
-
-              <div className="flex flex-col gap-2">
-                <label className="text-white font-semibold text-base">Description</label>
-                <textarea
-                  value={description}
-                  onChange={e => setDescription(e.target.value)}
-                  placeholder="Describe the task..."
-                  rows={3}
-                  className="bg-sq-col border border-sq-muted rounded text-white text-sm p-3 outline-none resize-none placeholder:text-sq-muted"
-                />
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <label className="text-white font-semibold text-base">Subtasks</label>
-                <div className="flex flex-col gap-1">
-                  {subtasks.map((sub, i) => (
-                    <div key={i} className="flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={sub}
-                        onChange={e => updateSubtask(i, e.target.value)}
-                        placeholder={`Subtask ${i + 1}`}
-                        className="flex-1 bg-sq-col border border-sq-muted rounded text-white text-sm px-3 py-2 outline-none placeholder:text-sq-muted"
-                      />
-                      {subtasks.length > 1 && (
-                        <button onClick={() => removeSubtask(i)} className="text-sq-muted hover:text-sq-danger transition-colors">
-                          <IconTrash size={14} />
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-                <button
-                  onClick={addSubtask}
-                  className="flex items-center gap-1 text-sq-muted hover:text-white text-xs transition-colors w-fit"
-                >
-                  <IconPlus size={14} /> Add subtask
-                </button>
-              </div>
-
+            {/* Parent story selector — tasks only */}
+            {type === 'task' && (
               <div className="flex flex-col gap-2">
                 <label className="text-white font-semibold text-base">Story</label>
                 <select
@@ -281,67 +256,74 @@ export default function TaskModal({ onClose, onCreated, defaultType = 'task', de
                   ))}
                 </select>
               </div>
+            )}
 
-              {error && <p className="text-sq-danger text-sm">{error}</p>}
+            {error && <p className="text-sq-danger text-sm">{error}</p>}
+          </div>
+
+          {/* RIGHT sidebar */}
+          <div className="w-56 bg-sq-col rounded-br-xl p-4 flex flex-col gap-4 shrink-0">
+
+            <div className="flex flex-col gap-1">
+              <label className="text-white text-sm font-medium">Assignee</label>
+              <select value={assigneeId} onChange={e => setAssigneeId(e.target.value)}
+                className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none">
+                <option value="">Select...</option>
+                {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+              </select>
             </div>
 
-            {/* RIGHT sidebar */}
-            <div className="w-56 bg-sq-col rounded-br-xl p-4 flex flex-col gap-4 shrink-0">
+            <div className="flex flex-col gap-1">
+              <label className="text-white text-sm font-medium">Priority</label>
+              <select value={priority} onChange={e => setPriority(Number(e.target.value))}
+                className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none">
+                {Object.entries(PRIORITY_LABELS).map(([val, label]) => (
+                  <option key={val} value={val}>{label}</option>
+                ))}
+              </select>
+            </div>
 
-              <div className="flex flex-col gap-1">
-                <label className="text-white text-sm font-medium">Assignee</label>
-                <select value={assigneeId} onChange={e => setAssigneeId(e.target.value)}
-                  className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none">
-                  <option value="">Select...</option>
-                  {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
-                </select>
-              </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-white text-sm font-medium">Reviewer</label>
+              <select value={reviewerId} onChange={e => setReviewerId(e.target.value)}
+                className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none">
+                <option value="">Select...</option>
+                {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+              </select>
+            </div>
 
-              <div className="flex flex-col gap-1">
-                <label className="text-white text-sm font-medium">Priority</label>
-                <select value={priority} onChange={e => setPriority(Number(e.target.value))}
-                  className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none">
-                  {Object.entries(PRIORITY_LABELS).map(([val, label]) => (
-                    <option key={val} value={val}>{label}</option>
-                  ))}
-                </select>
-              </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-white text-sm font-medium">Start Date</label>
+              <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+                className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none" />
+            </div>
 
-              <div className="flex flex-col gap-1">
-                <label className="text-white text-sm font-medium">Reviewer</label>
-                <select value={reviewerId} onChange={e => setReviewerId(e.target.value)}
-                  className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none">
-                  <option value="">Select...</option>
-                  {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
-                </select>
-              </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-white text-sm font-medium">Team</label>
+              <select value={teamId} onChange={e => setTeamId(e.target.value)}
+                className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none">
+                <option value="">Select...</option>
+                {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </div>
 
-              <div className="flex flex-col gap-1">
-                <label className="text-white text-sm font-medium">Period</label>
-                <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
-                  className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none" />
-                <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
-                  className="bg-sq-card border border-sq-muted rounded text-white text-sm px-2 py-2 outline-none" />
-              </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-white text-sm font-medium">Creator</label>
+              <span className="text-white text-xs">{currentUser?.full_name ?? '—'}</span>
+            </div>
 
-              <div className="flex flex-col gap-1">
-                <label className="text-white text-sm font-medium">Creator</label>
-                <span className="text-white text-xs">{currentUser?.full_name ?? '—'}</span>
-              </div>
-
-              <div className="mt-auto pt-4 flex flex-col gap-2">
-                <button onClick={handleSubmit} disabled={loading}
-                  className="w-full bg-sq-accent text-white text-sm font-semibold py-2 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50">
-                  {loading ? 'Creating...' : 'Create Task'}
-                </button>
-                <button onClick={onClose}
-                  className="w-full border border-sq-muted text-sq-muted text-sm py-2 rounded-lg hover:text-white hover:border-white transition-colors">
-                  Cancel
-                </button>
-              </div>
+            <div className="mt-auto pt-4 flex flex-col gap-2">
+              <button onClick={handleSubmit} disabled={loading}
+                className="w-full bg-sq-accent text-white text-sm font-semibold py-2 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50">
+                {loading ? 'Creating...' : type === 'story' ? 'Create Story' : 'Create Task'}
+              </button>
+              <button onClick={onClose}
+                className="w-full border border-sq-muted text-sq-muted text-sm py-2 rounded-lg hover:text-white hover:border-white transition-colors">
+                Cancel
+              </button>
             </div>
           </div>
-        )}
+        </div>
       </div>
     </div>
   )
