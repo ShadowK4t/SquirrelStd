@@ -112,7 +112,7 @@ export default function TaskModal({ onClose, onCreated, defaultType = 'task', de
         reviewer_id: reviewerId || null,
         priority,
         start_date: startDate || null,
-        parent_id: type === 'task' ? parentId : null,
+        parent_id: type === 'task' ? (parentId || null) : null,
         created_by: currentUser?.id,
         type,
       })
